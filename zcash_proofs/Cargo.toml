@@ -18,7 +18,8 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-zcash_primitives.workspace = true
+#zcash_primitives.workspace = true
+zcash_primitives = { git = "https://github.com/oxarbitrage/librustzcash.git", rev = "338c6322fabb06fd03e817882c8107c5090c4cea", workspace = true }
 
 # Dependencies exposed in a public API:
 # (Breaking upgrades to these require a breaking upgrade to this crate.)
