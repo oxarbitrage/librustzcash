@@ -17,7 +17,8 @@ categories = ["cryptography::cryptocurrencies"]
 all-features = true
 
 [dependencies]
-zcash_primitives = { version = "=0.13.0-rc.1", path = "../zcash_primitives", default-features = false }
+#zcash_primitives = { version = "=0.13.0-rc.1", path = "../zcash_primitives", default-features = false }
+zcash_primitives = { git = "https://github.com/oxarbitrage/librustzcash.git", rev = "e18c0d3b25049b9b748f9c8faf3e559ab94b431d", default-features = false }
 
 # Dependencies exposed in a public API:
 # (Breaking upgrades to these require a breaking upgrade to this crate.)
