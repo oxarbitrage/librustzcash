@@ -7,27 +7,26 @@ use std::{
     convert::Infallible,
     num::NonZeroU32,
 };
-use zcash_keys::keys::AddressGenerationError;
+use zcash_keys::keys::{AddressGenerationError, DerivationError};
 use zip32::DiversifierIndex;
 
 use zcash_primitives::{
     block::BlockHash,
     consensus::{BlockHeight, Network},
     memo::Memo,
-    transaction::{components::Amount, Transaction, TxId},
-    zip32::{AccountId, Scope},
+    transaction::{components::amount::NonNegativeAmount, Transaction, TxId},
+    zip32::AccountId,
 };
 
 use crate::{
     address::UnifiedAddress,
     keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey},
-    wallet::{Note, NoteId, ReceivedNote, WalletTransparentOutput, WalletTx},
-    ShieldedProtocol,
+    wallet::{NoteId, WalletTransparentOutput, WalletTx},
 };
 
 use super::{
-    chain::CommitmentTreeRoot, error::Error, scanning::ScanRange, AccountBirthday, BlockMetadata,
-    DecryptedTransaction, InputSource, NullifierQuery, ScannedBlock, SentTransaction,
+    chain::CommitmentTreeRoot, scanning::ScanRange, AccountBirthday, BlockMetadata,
+    DecryptedTransaction, NullifierQuery, ScannedBlock, SentTransaction,
     WalletCommitmentTrees, WalletRead, WalletSummary, WalletWrite, SAPLING_SHARD_HEIGHT,
 };
 
@@ -37,12 +36,12 @@ use {crate::wallet::TransparentAddressMetadata, zcash_primitives::legacy::Transp
 #[cfg(feature = "orchard")]
 use super::ORCHARD_SHARD_HEIGHT;
 
-struct MemoryWalletBlock {
-    height: BlockHeight,
-    hash: BlockHash,
-    block_time: u32,
+pub struct MemoryWalletBlock {
+    pub height: BlockHeight,
+    pub hash: BlockHash,
+    pub block_time: u32,
     // Just the transactions that involve an account in this wallet
-    transactions: HashMap<TxId, WalletTx<u32>>,
+    pub transactions: HashMap<TxId, WalletTx<u32>>,
 }
 
 impl PartialEq for MemoryWalletBlock {
@@ -73,40 +72,55 @@ pub struct MemoryWalletAccount {
 }
 
 pub struct MemoryWalletDb {
-    network: Network,
-    blocks: BTreeMap<BlockHeight, MemoryWalletBlock>,
-    tx_idx: HashMap<TxId, BlockHeight>,
-    accounts: BTreeMap<u32, MemoryWalletAccount>,
-    sapling_spends: HashMap<sapling::Nullifier, (TxId, bool)>,
+    pub network: Network,
+    pub blocks: BTreeMap<BlockHeight, MemoryWalletBlock>,
+    pub tx_idx: HashMap<TxId, BlockHeight>,
+    pub accounts: BTreeMap<u32, MemoryWalletAccount>,
+    pub sapling_spends: HashMap<sapling::Nullifier, (TxId, bool)>,
     #[cfg(feature = "orchard")]
-    orchard_spends: HashMap<orchard::note::Nullifier, (TxId, bool)>,
-    sapling_tree: ShardTree<
+    pub orchard_spends: HashMap<orchard::note::Nullifier, (TxId, bool)>,
+    pub sapling_tree: ShardTree<
         MemoryShardStore<sapling::Node, BlockHeight>,
         { SAPLING_SHARD_HEIGHT * 2 },
         SAPLING_SHARD_HEIGHT,
     >,
     #[cfg(feature = "orchard")]
-    orchard_tree: ShardTree<
+    pub orchard_tree: ShardTree<
         MemoryShardStore<orchard::tree::MerkleHashOrchard, BlockHeight>,
         { ORCHARD_SHARD_HEIGHT * 2 },
         ORCHARD_SHARD_HEIGHT,
     >,
 }
 
-pub enum Error {
-    AccountUnknown(u32),
-    MemoDecryptionError,
-    AddressGeneration(AddressGenerationError),
+#[derive(Debug)]
+pub enum AddressGenerationErrors {
+    DerivationError,
+    AddressGenerationError,
+
 }
 
-impl From<AddressGenerationError> for Error {
+#[derive(Debug)]
+pub enum MemoryWalletError {
+    AccountUnknown(u32),
+    MemoDecryptionError,
+    AddressGeneration(AddressGenerationErrors),
+    ScanRequired,
+}
+
+impl From<DerivationError> for MemoryWalletError {
+    fn from(value: DerivationError) -> Self {
+        MemoryWalletError::AddressGeneration(AddressGenerationErrors::DerivationError)
+    }
+}
+
+impl From<AddressGenerationError> for MemoryWalletError {
     fn from(value: AddressGenerationError) -> Self {
-        Error::AddressGeneration(value)
+        MemoryWalletError::AddressGeneration(AddressGenerationErrors::AddressGenerationError)
     }
 }
 
 impl WalletRead for MemoryWalletDb {
-    type Error = Error;
+    type Error = MemoryWalletError;
     type AccountId = u32;
 
     fn chain_height(&self) -> Result<Option<BlockHeight>, Self::Error> {
@@ -163,7 +177,7 @@ impl WalletRead for MemoryWalletDb {
     }
 
     fn get_account_birthday(&self, _account: Self::AccountId) -> Result<BlockHeight, Self::Error> {
-        Err(Error::AccountUnknown(_account))
+        Err(MemoryWalletError::AccountUnknown(_account))
     }
 
     fn get_current_address(
@@ -261,14 +275,15 @@ impl WalletRead for MemoryWalletDb {
     //        }
 
     fn get_memo(&self, id_note: NoteId) -> Result<Option<Memo>, Self::Error> {
+        /*
         self.blocks
             .iter()
             .find_map(|(_, b)| {
                 b.transactions.iter().find_map(|(txid, tx)| {
-                    if *txid == id_note.0 {
-                        tx.shielded_outputs.iter().find_map(|wso| {
-                            if wso.index == id_note.1 {
-                                wso.memo.clone().and_then(|m| m.to_utf8())
+                    if *txid == *id_note.txid() {
+                        tx.sapling_outputs().iter().find_map(|wso| {
+                            if wso.index() == id_note.output_index().into() {
+                                wso. memo.clone().and_then(|m| m.to_utf8())
                             } else {
                                 None
                             }
@@ -279,11 +294,13 @@ impl WalletRead for MemoryWalletDb {
                 })
             })
             .transpose()
-            .map_err(MemoryWalletError::MemoDecryptionError)
+            .map_err(|_| MemoryWalletError::MemoDecryptionError)
+        */
+        Err(MemoryWalletError::MemoDecryptionError)
     }
 
     fn get_transaction(&self, _id_tx: TxId) -> Result<Transaction, Self::Error> {
-        Err(Error::ScanRequired) // wrong error but we'll fix it later.
+        Err(MemoryWalletError::ScanRequired) // wrong error but we'll fix it later.
     }
 
     fn get_sapling_nullifiers(
@@ -314,7 +331,7 @@ impl WalletRead for MemoryWalletDb {
         &self,
         _account: Self::AccountId,
         _max_height: BlockHeight,
-    ) -> Result<HashMap<TransparentAddress, Amount>, Self::Error> {
+    ) -> Result<HashMap<TransparentAddress, NonNegativeAmount>, Self::Error> {
         Ok(HashMap::new())
     }
 
@@ -339,11 +356,12 @@ impl WalletWrite for MemoryWalletDb {
         seed: &SecretVec<u8>,
         birthday: AccountBirthday,
     ) -> Result<(Self::AccountId, UnifiedSpendingKey), Self::Error> {
-        let account_id = self.accounts.last_key_value().map_or(0, |(id, _)| id + 1);
-        let usk = UnifiedSpendingKey::from_seed(&self.network, seed.expose_secret(), account_id)?;
+        let account_id_number = self.accounts.last_key_value().map_or(0, |(id, _)| id + 1);
+        let account_id = AccountId::try_from(account_id_number).map_err(|_| MemoryWalletError::AccountUnknown(account_id_number))?;
+        let usk = UnifiedSpendingKey::from_seed(&self.network, seed.expose_secret(), account_id).map_err(|e| MemoryWalletError::AddressGeneration(AddressGenerationErrors::DerivationError))?;
         let ufvk = usk.to_unified_full_viewing_key();
         self.accounts.insert(
-            account_id,
+            account_id_number,
             MemoryWalletAccount {
                 account_id,
                 ufvk,
@@ -352,7 +370,7 @@ impl WalletWrite for MemoryWalletDb {
             },
         );
 
-        Ok((account_id, usk))
+        Ok((account_id_number, usk))
     }
 
     fn get_next_available_address(
@@ -360,9 +378,12 @@ impl WalletWrite for MemoryWalletDb {
         account: Self::AccountId,
         request: UnifiedAddressRequest,
     ) -> Result<Option<UnifiedAddress>, Self::Error> {
+        Err(MemoryWalletError::ScanRequired)
+        /*
         self.accounts
-            .get(account)
+            .get(&account)
             .map(|acct| acct.addresses.last_key_value())
+        */
     }
 
     #[allow(clippy::type_complexity)]
