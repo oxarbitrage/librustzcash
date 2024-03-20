@@ -8,7 +8,7 @@ use std::{
     num::NonZeroU32,
 };
 use zcash_keys::keys::{AddressGenerationError, DerivationError};
-use zip32::DiversifierIndex;
+use zip32::{DiversifierIndex, Scope};
 
 use zcash_primitives::{
     block::BlockHash,
@@ -26,8 +26,8 @@ use crate::{
 
 use super::{
     chain::CommitmentTreeRoot, scanning::ScanRange, AccountBirthday, BlockMetadata,
-    DecryptedTransaction, NullifierQuery, ScannedBlock, SentTransaction,
-    WalletCommitmentTrees, WalletRead, WalletSummary, WalletWrite, SAPLING_SHARD_HEIGHT,
+    DecryptedTransaction, NullifierQuery, ScannedBlock, SentTransaction, WalletCommitmentTrees,
+    WalletRead, WalletSummary, WalletWrite, SAPLING_SHARD_HEIGHT,
 };
 
 #[cfg(feature = "transparent-inputs")]
@@ -96,7 +96,6 @@ pub struct MemoryWalletDb {
 pub enum AddressGenerationErrors {
     DerivationError,
     AddressGenerationError,
-
 }
 
 #[derive(Debug)]
@@ -124,7 +123,11 @@ impl WalletRead for MemoryWalletDb {
     type AccountId = u32;
 
     fn chain_height(&self) -> Result<Option<BlockHeight>, Self::Error> {
-        Ok(None)
+        self.blocks
+            .iter()
+            .last()
+            .map(|(height, _)| *height)
+            .map_or(Ok(None), |h| Ok(Some(h)))
     }
 
     fn block_metadata(&self, _height: BlockHeight) -> Result<Option<BlockMetadata>, Self::Error> {
@@ -136,7 +139,14 @@ impl WalletRead for MemoryWalletDb {
     }
 
     fn block_max_scanned(&self) -> Result<Option<BlockMetadata>, Self::Error> {
-        Ok(None)
+        let last_inserted_block = self.blocks.iter().last();
+        let block_meta_data = last_inserted_block.map(|(height, block)| BlockMetadata {
+            block_height: *height,
+            block_hash: block.hash,
+            sapling_tree_size: None,
+        });
+
+        Ok(block_meta_data)
     }
 
     fn suggest_scan_ranges(&self) -> Result<Vec<ScanRange>, Self::Error> {
@@ -357,8 +367,12 @@ impl WalletWrite for MemoryWalletDb {
         birthday: AccountBirthday,
     ) -> Result<(Self::AccountId, UnifiedSpendingKey), Self::Error> {
         let account_id_number = self.accounts.last_key_value().map_or(0, |(id, _)| id + 1);
-        let account_id = AccountId::try_from(account_id_number).map_err(|_| MemoryWalletError::AccountUnknown(account_id_number))?;
-        let usk = UnifiedSpendingKey::from_seed(&self.network, seed.expose_secret(), account_id).map_err(|e| MemoryWalletError::AddressGeneration(AddressGenerationErrors::DerivationError))?;
+        let account_id = AccountId::try_from(account_id_number)
+            .map_err(|_| MemoryWalletError::AccountUnknown(account_id_number))?;
+        let usk = UnifiedSpendingKey::from_seed(&self.network, seed.expose_secret(), account_id)
+            .map_err(|e| {
+                MemoryWalletError::AddressGeneration(AddressGenerationErrors::DerivationError)
+            })?;
         let ufvk = usk.to_unified_full_viewing_key();
         self.accounts.insert(
             account_id_number,
@@ -389,12 +403,56 @@ impl WalletWrite for MemoryWalletDb {
     #[allow(clippy::type_complexity)]
     fn put_blocks(
         &mut self,
-        _blocks: Vec<ScannedBlock<Self::AccountId>>,
+        blocks: Vec<ScannedBlock<Self::AccountId>>,
     ) -> Result<(), Self::Error> {
+        let mut tx_idx = HashMap::new();
+
+        for block in blocks {
+            let transactions: HashMap<TxId, WalletTx<u32>> = HashMap::new();
+            for transaction in block.transactions {
+                // Fix this: we are assuming that the account is 0 among other things
+                transaction
+                    .sapling_outputs()
+                    .iter()
+                    .map(|o| {
+                        o.note().nf(
+                            &self
+                                .accounts
+                                .get(&0)
+                                .unwrap()
+                                .ufvk
+                                .sapling()
+                                .unwrap()
+                                .to_nk(Scope::External),
+                            o.note_commitment_tree_position().into(),
+                        )
+                    })
+                    .fold(0, |_, nullifier| {
+                        self.sapling_spends
+                            .insert(nullifier, (transaction.txid(), true));
+                        1
+                    });
+                let txid = transaction.txid();
+                self.tx_idx.insert(transaction.txid(), block.block_height);
+                tx_idx.insert(txid, block.block_height);
+            }
+
+            let memory_block = MemoryWalletBlock {
+                height: block.block_height,
+                hash: block.block_hash,
+                block_time: block.block_time,
+                transactions,
+            };
+
+            self.blocks.insert(block.block_height, memory_block);
+        }
+
         Ok(())
     }
 
     fn update_chain_tip(&mut self, _tip_height: BlockHeight) -> Result<(), Self::Error> {
+        // We are using the last inserted block height as the tip so we don't need to do anything here.
+        // If we want to update the tip we have to add a new field to `MemoryWalletDb` or change the height of the last block.
         Ok(())
     }
 
