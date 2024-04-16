@@ -450,8 +450,8 @@ impl WalletWrite for MemoryWalletDb {
                     });
 
                     // Add frontier to the sapling tree
-                    self.sapling_tree.insert_frontier(
-                        from_state.final_sapling_tree().clone(),
+                    self.sapling_tree.insert_frontier_nodes(
+                        from_state.final_sapling_tree().value().unwrap().clone(),
                         Retention::Checkpoint {
                             id: from_state.block_height(),
                             is_marked: false,
