@@ -49,7 +49,8 @@ bitvec = "1"
 blake2s_simd = "1"
 bls12_381 = "0.8"
 jubjub = "0.10"
-sapling = { package = "sapling-crypto", version = "0.1.1" }
+#sapling = { package = "sapling-crypto", version = "0.1.1" }
+sapling = { package = "sapling-crypto", git = "https://github.com/oxarbitrage/sapling-crypto", commit = "30e6089332d7bc532a74c2deb7d45ee7d090e5a6" }
 
 # - Orchard
 nonempty = "0.7"
